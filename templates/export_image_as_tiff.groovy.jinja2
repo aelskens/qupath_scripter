@@ -1,0 +1,43 @@
+// QuPath script to save the input image as a pyramidal ome.tif
+// Blend of https://forum.image.sc/t/qupath-saving-ome-tiff-script-run-in-bash/75029
+// and https://forum.image.sc/t/using-qupath-to-convert-very-large-tif-to-ome-tif-and-add-metadata/48636/4
+
+import qupath.lib.images.writers.ome.OMEPyramidWriter
+import qupath.lib.images.servers.*
+import javax.imageio.*
+import qupath.lib.images.servers.ImageServerMetadata
+
+//  ****** PARAMETERS *********
+
+// OME.Tiff parameters
+def tilesize = 512
+def outputDownsample = 1
+def pyramidscaling = 2
+def nThreads = 8
+def compression = OMEPyramidWriter.CompressionType.ZLIB  //ZLIB //UNCOMPRESSED //LZW  (not working with 32bit: //J2K_LOSSY //J2K)
+
+//  ***************************
+
+def server = getCurrentServer()
+def file = new File(server.getBuilder().getURIs()[0].toString())
+def imageData = getCurrentImageData()
+
+def filename = file.name.replaceFirst(/\.[^.]+$/, '') + ".ome.tif"
+def pathOutput = file.parentFile.parentFile.toString().substring(5) + "/" + filename
+
+def metadataNew = new ImageServerMetadata.Builder(server.getMetadata())
+    .pixelSizeMicrons({{ mpp_x }}, {{ mpp_y }})
+    .build()
+imageData.updateServerMetadata(metadataNew)
+
+println('Writing OME-TIFF ' + filename)
+
+new OMEPyramidWriter.Builder(server)
+    .compression(compression)
+    .parallelize(nThreads)    
+    .tileSize(tilesize)
+    .scaledDownsampling(outputDownsample, pyramidscaling)
+    .build()
+    .writePyramid(pathOutput)
+
+println('Done: ' + filename)
