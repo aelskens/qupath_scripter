@@ -30,7 +30,7 @@ ENV USER_HOME="/home/${USERNAME}"
 RUN sudo chown -R ${USERNAME} ${HOME}
 
 RUN sudo apt-get update \
-    && sudo apt-get install -y git openjdk-21-jdk binutils
+    && sudo apt-get install -y git openjdk-21-jdk binutils libvips-tools
 
 RUN sudo git clone https://github.com/qupath/qupath.git  "/opt/qupath"
 RUN cd  "/opt/qupath" \

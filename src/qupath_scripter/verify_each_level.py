@@ -11,13 +11,13 @@ if __name__ == "__main__":
 
     path = Path("/data/dataset_Marzahl/ISC/images/IHC")
 
-    images_path_list = [p for p in path.rglob("*.tif") if not p.name.endswith(".ome.tif")]
+    images_path_list = [p for p in path.rglob("*.ome.tif") if "rewritten" not in p.name]
 
     if not images_path_list:
-        print(f"No .tif files found under {path}")
+        print(f"No .ome.tif files found under {path}")
         raise SystemExit(0)
 
-    script_path = get_script_absolute_path("extract_base_level_N_metadata.groovy")
+    script_path = get_script_absolute_path("verify_sublevel_dimensions_discrepancy.groovy")
 
     loop = tqdm(images_path_list, desc="Images", total=len(images_path_list))
 
@@ -38,6 +38,7 @@ if __name__ == "__main__":
         )
 
         stdout, stderr = process.communicate()
+        print(stdout)
 
         if process.returncode != 0:
             log_path = image_path.parent / log_name
