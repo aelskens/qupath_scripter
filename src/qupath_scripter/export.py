@@ -11,7 +11,7 @@ if __name__ == "__main__":
 
     path = Path("/data/dataset_Marzahl/ISC/images/IHC")
 
-    images_path_list = [p for p in path.rglob("*.tif") if not p.name.endswith(".ome.tif")]
+    images_path_list = [p for p in path.rglob("*.ome.tif") if "rewritten" not in p.name]
 
     if not images_path_list:
         print(f"No .tif files found under {path}")
@@ -22,6 +22,9 @@ if __name__ == "__main__":
     loop = tqdm(images_path_list, desc="Images", total=len(images_path_list))
 
     for image_path in loop:
+        if Path(str(image_path).replace(".tif", "") + "_rewritten.ome.tif").exists():
+            continue
+
         loop.set_postfix(file=image_path.name)
 
         # Build the safe output filename (whitespace → underscore) so that

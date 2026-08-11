@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import numpy as np
 import pyvips
 import tifffile
 
@@ -10,6 +11,7 @@ def rebuild_pyramids_with_tifffile(
 ):
     import re
     import tempfile
+    from xml.dom.minidom import parseString
 
     files = list(path.rglob(pattern))
     if not files:
@@ -30,27 +32,38 @@ def rebuild_pyramids_with_tifffile(
             continue
 
         try:
-            image = pyvips.Image.new_from_file(str(input_path), access="sequential")
-            print(f"  Size: {image.width} x {image.height}, bands={image.bands}, format={image.format}")
+            # Read page 0 for metadata
+            image_meta = pyvips.Image.new_from_file(str(input_path), access="sequential", page=0)
+            fields = image_meta.get_fields()
+            n_pages = int(image_meta.get("n-pages")) if "n-pages" in fields else 1
+            print(f"  Size: {image_meta.width} x {image_meta.height}, n_pages={n_pages}, format={image_meta.format}")
 
-            # Extract pixel size from OME-XML
+            # Extract pixel size and channel names from OME-XML
             pixel_size_um = None
-            fields = image.get_fields()
+            channel_names = None
             if "image-description" in fields:
-                xml = image.get("image-description")
+                xml = image_meta.get("image-description")
                 m = re.search(r'PhysicalSizeX="([0-9.]+)"', xml)
                 if m:
                     pixel_size_um = float(m.group(1))
+                try:
+                    channels = parseString(xml).getElementsByTagName("Channel")
+                    names = [c.attributes["Name"].value for c in channels if c.attributes.get("Name")]
+                    channel_names = names if names else None
+                except Exception:
+                    pass
+
             print(f"  Pixel size: {pixel_size_um} µm")
+            print(f"  Channels: {channel_names}")
 
             # Extract resolution
-            xres = image.get("xres") if "xres" in fields else None
-            yres = image.get("yres") if "yres" in fields else None
+            xres = image_meta.get("xres") if "xres" in fields else None
+            yres = image_meta.get("yres") if "yres" in fields else None
             resolution = (xres * 10, yres * 10) if xres and yres else None
 
             # Compute level dimensions using strict floor(prev/2) chain
             levels_dims = []
-            w, h = image.width, image.height
+            w, h = image_meta.width, image_meta.height
             while max(w, h) >= tile_size:
                 levels_dims.append((w, h))
                 nw, nh = int(w / 2), int(h / 2)
@@ -67,60 +80,67 @@ def rebuild_pyramids_with_tifffile(
                 write_options["compressionargs"] = {"level": quality}
             if resolution:
                 write_options["resolution"] = resolution
-                write_options["resolutionunit"] = 3  # cm
+                write_options["resolutionunit"] = 3
 
             ome_metadata = {}
             if pixel_size_um:
-                ome_metadata = {
-                    "PhysicalSizeX": pixel_size_um,
-                    "PhysicalSizeXUnit": "µm",
-                    "PhysicalSizeY": pixel_size_um,
-                    "PhysicalSizeYUnit": "µm",
-                }
+                ome_metadata["PhysicalSizeX"] = pixel_size_um
+                ome_metadata["PhysicalSizeXUnit"] = "µm"
+                ome_metadata["PhysicalSizeY"] = pixel_size_um
+                ome_metadata["PhysicalSizeYUnit"] = "µm"
+            if channel_names:
+                ome_metadata["Channel"] = {"Name": channel_names}
 
             with tifffile.TiffWriter(str(output_path), bigtiff=True, ome=True) as tif:
                 for j, (lw, lh) in enumerate(levels_dims):
                     print(f"  Writing level {j}: {lw} x {lh}...")
 
-                    if lw == image.width and lh == image.height:
-                        resized = image
-                    else:
-                        # Independent x/y scale factors to hit exact floor(prev/2) targets
-                        xscale = lw / image.width
-                        yscale = lh / image.height
-                        resized = image.resize(xscale, vscale=yscale, kernel="lanczos3")
-                        # Crop as safety net for any residual 1-pixel overshoot
-                        resized = resized.crop(0, 0, min(resized.width, lw), min(resized.height, lh))
+                    # Collect all pages for this level then stack into single array
+                    # so tifffile writes them as one multi-page entry in the same series
+                    level_pages = []
+                    for page_idx in range(n_pages):
+                        image = pyvips.Image.new_from_file(str(input_path), access="sequential", page=page_idx, n=1)
 
-                    with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
-                        tmp_path = tmp.name
-
-                    try:
-                        resized.tiffsave(
-                            tmp_path,
-                            tile=True,
-                            tile_width=tile_size,
-                            tile_height=tile_size,
-                            compression=compression,
-                            Q=quality if compression == "jpeg" else None,
-                            bigtiff=True,
-                        )
-
-                        with tifffile.TiffFile(tmp_path) as tmp_tif:
-                            arr = tmp_tif.pages[0].asarray()
-
-                        write_kwargs = {**write_options}
-                        if j == 0:
-                            write_kwargs["subifds"] = len(levels_dims) - 1
-                            write_kwargs["metadata"] = ome_metadata if ome_metadata else None
+                        if lw == image.width and lh == image.height:
+                            resized = image
                         else:
-                            write_kwargs["subfiletype"] = 1
+                            xscale = lw / image.width
+                            yscale = lh / image.height
+                            resized = image.resize(xscale, vscale=yscale, kernel="lanczos3")
+                            resized = resized.crop(0, 0, min(resized.width, lw), min(resized.height, lh))
 
-                        tif.write(arr, **write_kwargs)
-                        del arr
+                        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+                            tmp_path = tmp.name
+                        try:
+                            tiffsave_args = dict(
+                                tile=True,
+                                tile_width=tile_size,
+                                tile_height=tile_size,
+                                compression=compression,
+                                bigtiff=True,
+                            )
+                            if compression == "jpeg":
+                                tiffsave_args["Q"] = quality
 
-                    finally:
-                        Path(tmp_path).unlink(missing_ok=True)
+                            resized.tiffsave(tmp_path, **tiffsave_args)
+                            with tifffile.TiffFile(tmp_path) as tmp_tif:
+                                level_pages.append(tmp_tif.pages[0].asarray())
+                        finally:
+                            Path(tmp_path).unlink(missing_ok=True)
+
+                    # Stack channels on axis 0: (n_pages, h, w) or (n_pages, h, w, bands)
+                    arr = np.stack(level_pages, axis=0)
+
+                    write_kwargs = {**write_options}
+                    if j == 0:
+                        write_kwargs["subifds"] = len(levels_dims) - 1
+                        write_kwargs["metadata"] = ome_metadata if ome_metadata else None
+                    else:
+                        write_kwargs["subfiletype"] = 1
+
+                    tif.write(arr, **write_kwargs)
+                    del arr
+                    del level_pages
 
             size_gb = output_path.stat().st_size / 1024**3
             print(f"  Done, {size_gb:.2f} GB")
